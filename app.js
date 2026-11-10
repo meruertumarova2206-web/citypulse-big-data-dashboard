@@ -1,35 +1,35 @@
 (() => {
-  const datasets = [
-    { name: 'Транспортные потоки', sub: 'Городские датчики', icon: '↗', type: 'Телеметрия', region: 'Центр', regionKey: 'center', quality: 99.2, updated: '2 мин назад', status: 'Активен' },
-    { name: 'Городская мобильность', sub: 'Обезличенные GPS-треки', icon: '⌁', type: 'Геоданные', region: 'Север', regionKey: 'north', quality: 98.6, updated: '4 мин назад', status: 'Активен' },
-    { name: 'Качество воздуха', sub: 'Станции мониторинга', icon: '⌖', type: 'Сенсорные данные', region: 'Центр', regionKey: 'center', quality: 99.8, updated: '1 мин назад', status: 'Активен' },
-    { name: 'Пассажиропоток', sub: 'Умные остановки', icon: '⇄', type: 'Телеметрия', region: 'Юг', regionKey: 'south', quality: 97.4, updated: '7 мин назад', status: 'Активен' },
-    { name: 'Погодные условия', sub: 'Метеостанции города', icon: '☼', type: 'Сенсорные данные', region: 'Север', regionKey: 'north', quality: 96.1, updated: '18 мин назад', status: 'Обслуживание' },
-    { name: 'Городские события', sub: 'Обезличенная статистика', icon: '◌', type: 'Агрегированные', region: 'Юг', regionKey: 'south', quality: 99.4, updated: '5 мин назад', status: 'Активен' },
-  ];
-
+  const cities = {
+    almaty: { name: 'Алматы', latitude: 43.2389, longitude: 76.8897 },
+    astana: { name: 'Астана', latitude: 51.1694, longitude: 71.4491 },
+    shymkent: { name: 'Шымкент', latitude: 42.3417, longitude: 69.5901 },
+  };
+  const metrics = {
+    us_aqi: { label: 'US AQI', unit: '', step: 25 },
+    pm2_5: { label: 'PM₂.₅', unit: 'мкг/м³', step: 10 },
+    pm10: { label: 'PM₁₀', unit: 'мкг/м³', step: 10 },
+  };
   const $ = (selector) => document.querySelector(selector);
-  const numberFormat = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 });
-  const monthFormat = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short' });
-  const dayMs = 24 * 60 * 60 * 1000;
-  const today = new Date();
-  const chartData = Array.from({ length: 90 }, (_, index) => {
-    const date = new Date(today.getTime() - (89 - index) * dayMs);
-    const wave = Math.sin(index * 0.29) * 6.1 + Math.sin(index * 0.73) * 2.6;
-    const noise = ((index * 37 + 19) % 17) - 8;
-    const value = Math.max(42, 61 + wave + noise * 0.75 + index * 0.025);
-    const anomalyNoise = ((index * 29 + 11) % 51);
-    const anomalies = Math.max(24, Math.round(103 + 43 * Math.sin(index * 0.32) + anomalyNoise));
-    return { date, value, anomalies };
-  });
-
-  let activeDays = 30;
-  let activeMetric = 'volume';
+  const numberFormat = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 });
+  const apiCache = new Map();
+  const cacheLifetime = 15 * 60 * 1000;
+  let activeData = null;
+  let activeCityKey = 'almaty';
+  let activeHours = 24;
+  let activeMetric = 'us_aqi';
+  let requestSequence = 0;
   let toastTimer;
 
-  function formatVolume(millions) {
-    if (millions >= 1000) return `${(millions / 1000).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} млрд`;
-    return `${numberFormat.format(millions)} млн`;
+  function formatNumber(value) {
+    return Number.isFinite(value) ? numberFormat.format(value) : '—';
+  }
+
+  function formatCityTime(unixSeconds, timeZone, withDate = false) {
+    if (!Number.isFinite(unixSeconds)) return 'время не указано';
+    const options = withDate
+      ? { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone }
+      : { hour: '2-digit', minute: '2-digit', timeZone };
+    return new Intl.DateTimeFormat('ru-RU', options).format(new Date(unixSeconds * 1000));
   }
 
   function announce(message) {
@@ -37,94 +37,260 @@
     toast.textContent = message;
     toast.classList.add('visible');
     window.clearTimeout(toastTimer);
-    toastTimer = window.setTimeout(() => toast.classList.remove('visible'), 3000);
+    toastTimer = window.setTimeout(() => toast.classList.remove('visible'), 3200);
   }
 
-  function renderDatasets() {
-    const query = $('#dataset-search').value.trim().toLocaleLowerCase('ru-RU');
-    const region = $('#region-filter').value;
-    const visible = datasets.filter((item) => {
-      const matchesQuery = `${item.name} ${item.sub} ${item.type} ${item.region}`.toLocaleLowerCase('ru-RU').includes(query);
-      return matchesQuery && (region === 'all' || item.regionKey === region);
-    });
-    const tbody = $('#dataset-rows');
-    tbody.innerHTML = visible.map((item) => {
-      const statusClass = item.status === 'Активен' ? '' : ' maintenance';
-      return `<tr>
-        <td><div class="source-cell"><span class="source-icon" aria-hidden="true">${item.icon}</span><span>${item.name}<small class="source-sub">${item.sub}</small></span></div></td>
-        <td>${item.type}</td><td>${item.region}</td>
-        <td><div class="quality-cell"><span class="quality-number">${item.quality.toLocaleString('ru-RU', { minimumFractionDigits: 1 })}%</span><span class="quality-bar"><i style="width:${item.quality}%"></i></span></div></td>
-        <td>${item.updated}</td><td><span class="status-badge${statusClass}">${item.status}</span></td>
-      </tr>`;
-    }).join('');
-    $('#empty-state').hidden = visible.length > 0;
-    $('#dataset-count').textContent = `Показано ${visible.length} из ${datasets.length} наборов`;
+  function setConnectionState(state, message) {
+    const status = $('#connection-status');
+    status.classList.toggle('state-error', state === 'error');
+    status.classList.toggle('state-loading', state === 'loading');
+    $('#connection-label').textContent = message;
+  }
+
+  function setLoading(isLoading) {
+    $('#refresh-button').disabled = isLoading;
+    $('#city-select').disabled = isLoading;
+    if (isLoading) setConnectionState('loading', 'ПОЛУЧАЕМ МОДЕЛЬ');
+  }
+
+  function makeApiUrl(city) {
+    const url = new URL('https://air-quality-api.open-meteo.com/v1/air-quality');
+    url.search = new URLSearchParams({
+      latitude: city.latitude,
+      longitude: city.longitude,
+      current: 'us_aqi,pm2_5,pm10,nitrogen_dioxide,ozone',
+      hourly: 'us_aqi,pm2_5,pm10',
+      past_hours: '23',
+      forecast_hours: '1',
+      timezone: 'auto',
+      timeformat: 'unixtime',
+      domains: 'cams_global',
+    }).toString();
+    return url;
+  }
+
+  function setKpi(id, value, unit = '') {
+    $(`#${id}`).innerHTML = `${formatNumber(value)} <small>${unit}</small>`;
+  }
+
+  function renderCurrent(data) {
+    const current = data.current;
+    const city = cities[activeCityKey];
+    $('#aqi-value').innerHTML = `${formatNumber(current.us_aqi)} <small>US AQI</small>`;
+    setKpi('pm25-value', current.pm2_5, 'мкг/м³');
+    setKpi('pm10-value', current.pm10, 'мкг/м³');
+    setKpi('no2-value', current.nitrogen_dioxide, 'мкг/м³');
+    $('#aqi-note').textContent = 'Индекс рассчитан моделью CAMS';
+    $('#updated-at').textContent = `${city.name} · ${formatCityTime(current.time, data.timezone, true)}`;
+  }
+
+  function niceMaximum(value, step) {
+    return Math.max(step, Math.ceil(value / step) * step);
   }
 
   function renderChart() {
-    const points = chartData.slice(-activeDays);
-    const anomalyMode = activeMetric === 'anomalies';
-    const values = points.map((point) => anomalyMode ? point.anomalies : point.value);
-    const total = values.reduce((sum, value) => sum + value, 0);
-    const min = anomalyMode ? 0 : 0;
-    const max = anomalyMode ? Math.ceil(Math.max(...values) / 100) * 100 : 80;
-    const top = 18;
+    const chartEmpty = $('#chart-empty');
+    const hourly = activeData?.hourly;
+    const definition = metrics[activeMetric];
+    if (!hourly || !Array.isArray(hourly[activeMetric])) {
+      $('#chart-line').setAttribute('d', '');
+      $('#chart-area').setAttribute('d', '');
+      $('#x-axis').innerHTML = '';
+      $('#chart-total').textContent = '—';
+      chartEmpty.hidden = false;
+      return;
+    }
+
+    const allPoints = hourly.time.map((time, index) => ({
+      time,
+      value: hourly[activeMetric][index],
+      pm25: hourly.pm2_5?.[index],
+      pm10: hourly.pm10?.[index],
+      aqi: hourly.us_aqi?.[index],
+    })).filter((point) => Number.isFinite(point.time) && Number.isFinite(point.value));
+    const points = allPoints.slice(-activeHours);
+    if (!points.length) {
+      chartEmpty.hidden = false;
+      return;
+    }
+    chartEmpty.hidden = true;
+
+    const values = points.map((point) => point.value);
+    const topValue = niceMaximum(Math.max(...values) * 1.08, definition.step);
     const bottom = 246;
-    const left = 2;
-    const right = 798;
+    const top = 18;
     const coordinates = values.map((value, index) => ({
-      x: left + (right - left) * (index / Math.max(values.length - 1, 1)),
-      y: bottom - ((value - min) / (max - min)) * (bottom - top),
+      x: 2 + 796 * (index / Math.max(values.length - 1, 1)),
+      y: bottom - (Math.max(value, 0) / topValue) * (bottom - top),
     }));
     const linePath = coordinates.map((point, index) => `${index === 0 ? 'M' : 'L'}${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(' ');
-    const areaPath = `${linePath} L${right} ${bottom} L${left} ${bottom} Z`;
+    const areaPath = `${linePath} L798 ${bottom} L2 ${bottom} Z`;
     const last = coordinates.at(-1);
     $('#chart-line').setAttribute('d', linePath);
     $('#chart-area').setAttribute('d', areaPath);
     $('#chart-point').setAttribute('cx', last.x.toFixed(1));
     $('#chart-point').setAttribute('cy', last.y.toFixed(1));
-    $('#chart-total').textContent = anomalyMode ? `${numberFormat.format(total)} событий` : formatVolume(total);
-    $('#total-events').innerHTML = anomalyMode
-      ? `${numberFormat.format(total)} <small>событий</small>`
-      : `${(total / 1000).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} <small>млрд</small>`;
-    $('#legend-label').textContent = anomalyMode ? 'Обнаружено аномалий' : 'Обработано событий';
-    $('#main-chart').setAttribute('aria-label', `${anomalyMode ? 'График аномалий' : 'График объёма городских данных'} за последние ${activeDays} дней`);
-    $('#axis-top').textContent = anomalyMode ? `${numberFormat.format(max)}` : `${max} млн`;
-    $('#axis-mid').textContent = anomalyMode ? `${numberFormat.format(max * .5)}` : `${max * .75} млн`;
-    $('#axis-lower').textContent = anomalyMode ? `${numberFormat.format(max * .25)}` : `${max * .5} млн`;
-    $('#axis-quarter').textContent = anomalyMode ? `${numberFormat.format(max * .125)}` : `${max * .25} млн`;
-    const ticks = [0, Math.floor((points.length - 1) / 3), Math.floor((points.length - 1) * 2 / 3), points.length - 1];
-    $('#x-axis').innerHTML = [...new Set(ticks)].map((index) => `<span>${monthFormat.format(points[index].date).replace('.', '')}</span>`).join('');
+    $('#chart-total').textContent = `${formatNumber(values.at(-1))}${definition.unit ? ` ${definition.unit}` : ''}`;
+    $('#chart-unit').textContent = `${definition.label} · модельная оценка`;
+    $('#legend-label').textContent = `${definition.label}${definition.unit ? ` · ${definition.unit}` : ''}`;
+    $('#main-chart').setAttribute('aria-label', `Почасовой график ${definition.label} за последние ${activeHours} часов`);
+    $('#axis-top').textContent = formatNumber(topValue);
+    $('#axis-mid').textContent = formatNumber(topValue * .75);
+    $('#axis-lower').textContent = formatNumber(topValue * .5);
+    $('#axis-quarter').textContent = formatNumber(topValue * .25);
+
+    const tickIndices = [...new Set([0, Math.floor((points.length - 1) / 3), Math.floor((points.length - 1) * 2 / 3), points.length - 1])];
+    const timeFormatter = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: activeData.timezone || 'Asia/Almaty' });
+    $('#x-axis').innerHTML = tickIndices.map((index) => `<span>${timeFormatter.format(new Date(points[index].time * 1000))}</span>`).join('');
+  }
+
+  function renderHourlyTable(data) {
+    const hourly = data.hourly;
+    const records = hourly.time.map((time, index) => ({
+      time,
+      aqi: hourly.us_aqi?.[index],
+      pm25: hourly.pm2_5?.[index],
+      pm10: hourly.pm10?.[index],
+    })).filter((row) => Number.isFinite(row.time)).slice(-24).reverse();
+    const rows = records.map((row) => `<tr>
+      <td>${formatCityTime(row.time, data.timezone, true)}</td>
+      <td>${formatNumber(row.aqi)}</td>
+      <td>${formatNumber(row.pm25)}</td>
+      <td>${formatNumber(row.pm10)}</td>
+      <td><span class="status-badge model-badge">CAMS · модель</span></td>
+    </tr>`).join('');
+    $('#hourly-rows').innerHTML = rows;
+    $('#empty-state').hidden = records.length > 0;
+    $('#empty-state').textContent = records.length ? '' : 'Для этого города пока нет часовых значений.';
+    $('#table-count').textContent = records.length ? `Показано ${records.length} часовых значений` : 'Нет строк данных';
+    $('#export-button').disabled = records.length === 0;
+  }
+
+  function renderData(data) {
+    activeData = data;
+    renderCurrent(data);
+    renderChart();
+    renderHourlyTable(data);
+    setConnectionState('ready', 'МОДЕЛЬНЫЕ ДАННЫЕ');
+  }
+
+  function showError(error) {
+    activeData = null;
+    setConnectionState('error', 'НЕТ СВЯЗИ С API');
+    $('#updated-at').textContent = 'Не удалось получить данные';
+    $('#aqi-value').innerHTML = '— <small>US AQI</small>';
+    for (const id of ['pm25-value', 'pm10-value', 'no2-value']) $(`#${id}`).innerHTML = '— <small>мкг/м³</small>';
+    $('#aqi-note').textContent = 'Источник временно недоступен';
+    $('#chart-line').setAttribute('d', '');
+    $('#chart-area').setAttribute('d', '');
+    $('#chart-point').setAttribute('cx', '0');
+    $('#chart-point').setAttribute('cy', '0');
+    $('#chart-empty').hidden = false;
+    $('#chart-total').textContent = '—';
+    $('#chart-unit').textContent = 'Данные не загружены';
+    $('#hourly-rows').innerHTML = '';
+    $('#empty-state').hidden = false;
+    $('#empty-state').textContent = 'Не удалось загрузить данные. Проверьте подключение и попробуйте обновить.';
+    $('#table-count').textContent = 'Данные не загружены';
+    $('#export-button').disabled = true;
+    console.error('CityPulse data request failed:', error);
+  }
+
+  let currentController = null;
+  async function loadCity(cityKey, force = false) {
+    const cityChanged = cityKey !== activeCityKey;
+    activeCityKey = cityKey;
+    const sequence = ++requestSequence;
+    if (currentController) currentController.abort();
+    const controller = new AbortController();
+    currentController = controller;
+    setLoading(true);
+    const city = cities[cityKey];
+    if (cityChanged) {
+      activeData = null;
+      $('#updated-at').textContent = `${city.name} · получаем модельные данные…`;
+      $('#aqi-value').innerHTML = '— <small>US AQI</small>';
+      for (const id of ['pm25-value', 'pm10-value', 'no2-value']) $(`#${id}`).innerHTML = '— <small>мкг/м³</small>';
+      $('#chart-line').setAttribute('d', '');
+      $('#chart-area').setAttribute('d', '');
+      $('#chart-point').setAttribute('cx', '0');
+      $('#chart-point').setAttribute('cy', '0');
+      $('#chart-empty').hidden = false;
+      $('#chart-total').textContent = '—';
+      $('#chart-unit').textContent = 'Получаем данные';
+      $('#hourly-rows').innerHTML = '';
+      $('#empty-state').hidden = false;
+      $('#empty-state').textContent = 'Загружаем почасовые данные для выбранного города…';
+      $('#table-count').textContent = 'Загрузка данных';
+      $('#export-button').disabled = true;
+    }
+    const cached = apiCache.get(cityKey);
+    if (!force && cached && Date.now() - cached.fetchedAt < cacheLifetime) {
+      renderData(cached.data);
+      currentController = null;
+      setLoading(false);
+      return;
+    }
+    const timeout = window.setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch(makeApiUrl(city), { signal: controller.signal, headers: { Accept: 'application/json' }, cache: 'no-store' });
+      if (!response.ok) throw new Error(`Источник ответил с кодом ${response.status}`);
+      const data = await response.json();
+      if (data.error) throw new Error(data.reason || 'Источник вернул ошибку');
+      if (sequence !== requestSequence) return;
+      if (!data.current || !data.hourly || !Array.isArray(data.hourly.time)) throw new Error('В ответе API не хватает данных');
+      apiCache.set(cityKey, { data, fetchedAt: Date.now() });
+      renderData(data);
+    } catch (error) {
+      if (sequence !== requestSequence) return;
+      if (error.name !== 'AbortError') showError(error);
+      else showError(new Error('Время ожидания ответа истекло'));
+    } finally {
+      window.clearTimeout(timeout);
+      if (sequence === requestSequence) {
+        currentController = null;
+        setLoading(false);
+      }
+    }
   }
 
   function exportCsv() {
-    const query = $('#dataset-search').value.trim().toLocaleLowerCase('ru-RU');
-    const region = $('#region-filter').value;
-    const visible = datasets.filter((item) => `${item.name} ${item.sub} ${item.type} ${item.region}`.toLocaleLowerCase('ru-RU').includes(query) && (region === 'all' || item.regionKey === region));
-    const rows = [['Источник', 'Описание', 'Тип данных', 'Регион', 'Качество данных', 'Последнее обновление', 'Статус'], ...visible.map((item) => [item.name, item.sub, item.type, item.region, `${item.quality}%`, item.updated, item.status])];
+    if (!activeData) return;
+    const hourly = activeData.hourly;
+    const city = cities[activeCityKey];
+    const rows = [
+      ['Город', 'Местное время', 'US AQI', 'PM2.5 (мкг/м³)', 'PM10 (мкг/м³)', 'Источник'],
+      ...hourly.time.map((time, index) => [
+        city.name,
+        formatCityTime(time, activeData.timezone, true),
+        formatNumber(hourly.us_aqi?.[index]),
+        formatNumber(hourly.pm2_5?.[index]),
+        formatNumber(hourly.pm10?.[index]),
+        'CAMS Global через Open-Meteo; модельная оценка',
+      ]),
+    ];
     const csv = `\uFEFF${rows.map((row) => row.map((value) => `"${String(value).replaceAll('"', '""')}"`).join(';')).join('\r\n')}`;
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
     const link = document.createElement('a');
     link.href = url;
-    link.download = 'citypulse-data-sources.csv';
+    link.download = `citypulse-air-quality-${activeCityKey}.csv`;
     document.body.append(link);
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
-    announce(`Экспортировано наборов данных: ${visible.length}`);
+    announce('Часовые значения сохранены в CSV');
   }
 
-  $('#dataset-search').addEventListener('input', renderDatasets);
-  $('#region-filter').addEventListener('change', renderDatasets);
+  $('#city-select').addEventListener('change', (event) => loadCity(event.target.value));
+  $('#refresh-button').addEventListener('click', () => loadCity(activeCityKey, true));
   $('#export-button').addEventListener('click', exportCsv);
-  $('#nav-export').addEventListener('click', exportCsv);
   $('#metric-select').addEventListener('change', (event) => {
     activeMetric = event.target.value;
     renderChart();
   });
   document.querySelectorAll('.period-switch button').forEach((button) => {
     button.addEventListener('click', () => {
-      activeDays = Number(button.dataset.days);
+      activeHours = Number(button.dataset.hours);
       document.querySelectorAll('.period-switch button').forEach((candidate) => {
         const selected = candidate === button;
         candidate.classList.toggle('selected', selected);
@@ -134,8 +300,7 @@
     });
   });
 
-  const themeToggle = $('#theme-toggle');
-  themeToggle.addEventListener('click', () => {
+  $('#theme-toggle').addEventListener('click', () => {
     document.body.classList.toggle('dark');
     const isDark = document.body.classList.contains('dark');
     try { localStorage.setItem('citypulse-theme', isDark ? 'dark' : 'light'); } catch { /* Storage is optional. */ }
@@ -144,13 +309,6 @@
   try {
     if (localStorage.getItem('citypulse-theme') === 'dark') document.body.classList.add('dark');
   } catch { /* Storage is optional. */ }
-
-  $('#refresh-button').addEventListener('click', () => {
-    $('#updated-at').textContent = 'только что';
-    renderChart();
-    announce('Демонстрационные данные обновлены');
-  });
-  $('#streams-more').addEventListener('click', () => announce('Источники данных показаны в демонстрационном режиме'));
 
   const menuButton = $('#menu-toggle');
   const sidebar = $('#sidebar');
@@ -161,8 +319,9 @@
   sidebar.querySelectorAll('a.nav-link').forEach((link) => {
     link.addEventListener('click', () => {
       sidebar.querySelectorAll('.nav-link').forEach((item) => {
-        item.classList.toggle('active', item === link);
-        if (item === link) item.setAttribute('aria-current', 'page');
+        const isCurrent = item === link;
+        item.classList.toggle('active', isCurrent);
+        if (isCurrent) item.setAttribute('aria-current', 'page');
         else item.removeAttribute('aria-current');
       });
       sidebar.classList.remove('open');
@@ -170,6 +329,5 @@
     });
   });
 
-  renderDatasets();
-  renderChart();
+  loadCity(activeCityKey);
 })();
